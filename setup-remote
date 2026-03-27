@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# setup-remote — minimal AI dev environment on a remote Linux machine
+# Usage: scp ~/.local/bin/setup-remote user@host:~ && ssh user@host "bash ~/setup-remote"
+# Or:    bash <(curl -fsSL https://raw.githubusercontent.com/alityb/dotfiles/main/setup-remote)
+
+set -e
+
+green()  { echo -e "\033[32m$*\033[0m"; }
+yellow() { echo -e "\033[33m$*\033[0m"; }
+red()    { echo -e "\033[31m$*\033[0m"; }
+
+green "==> Setting up remote dev environment"
+
+# ─── Package manager ─────────────────────────────────────────────────────────
+if command -v apt-get &>/dev/null; then
+  INSTALL="sudo apt-get install -y"
+  sudo apt-get update -qq
+elif command -v dnf &>/dev/null; then
+  INSTALL="sudo dnf install -y"
+elif command -v pacman &>/dev/null; then
+  INSTALL="sudo pacman -S --noconfirm"
+else
+  red "Unknown package manager — install packages manually"
+  exit 1
+fi
+
+# ─── Essentials only: git, tmux, ripgrep, fzf, unzip ─────────────────────────
+green "==> Installing essentials"
+$INSTALL git tmux ripgrep fzf unzip curl 2>/dev/null || true
+
+# ─── Neovim ──────────────────────────────────────────────────────────────────
+if ! command -v nvim &>/dev/null; then
+  green "==> Installing Neovim"
+  curl -sLO https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.tar.gz
+  sudo tar -C /opt -xzf nvim-linux-x86_64.tar.gz
+  sudo ln -sf /opt/nvim-linux-x86_64/bin/nvim /usr/local/bin/nvim
+  rm nvim-linux-x86_64.tar.gz
+else
+  green "==> Neovim $(nvim --version | head -1) already installed"
+fi
+
+# ─── Node (needed for claude + codex) ────────────────────────────────────────
+if ! command -v node &>/dev/null; then
+  green "==> Installing Node.js"
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+  export NVM_DIR="$HOME/.nvm"
+  source "$NVM_DIR/nvm.sh"
+  nvm install --lts --silent
+fi
+
+# ensure nvm is loaded for rest of script
+export NVM_DIR="$HOME/.nvm"
+[[ -s "$NVM_DIR/nvm.sh" ]] && source "$NVM_DIR/nvm.sh"
+
+# ─── Claude Code ─────────────────────────────────────────────────────────────
+if ! command -v claude &>/dev/null; then
+  green "==> Installing Claude Code"
+  npm install -g @anthropic-ai/claude-code
+else
+  green "==> Claude Code already installed"
+fi
+
+# ─── Codex ───────────────────────────────────────────────────────────────────
+if ! command -v codex &>/dev/null; then
+  green "==> Installing Codex"
+  npm install -g @openai/codex
+else
+  green "==> Codex already installed"
+fi
+
+# ─── Nvim config ─────────────────────────────────────────────────────────────
+green "==> Setting up nvim config"
+mkdir -p "$HOME/.config"
+if [[ ! -d "$HOME/.config/nvim" ]]; then
+  if git ls-remote "https://github.com/alityb/dotfiles" &>/dev/null; then
+    git clone --depth=1 https://github.com/alityb/dotfiles /tmp/dotfiles
+    cp -r /tmp/dotfiles/nvim "$HOME/.config/nvim"
+    rm -rf /tmp/dotfiles
+  else
+    yellow "==> dotfiles repo not found — skipping nvim config"
+  fi
+fi
+
+# ─── Minimal tmux config ─────────────────────────────────────────────────────
+green "==> Setting up tmux"
+if [[ ! -f "$HOME/.tmux.conf" ]]; then
+  cat > "$HOME/.tmux.conf" << 'TMUXEOF'
+set -g prefix C-a
+unbind C-b
+bind C-a send-prefix
+set -g mouse on
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+set -g history-limit 50000
+set -sg escape-time 0
+set -g default-terminal "tmux-256color"
+set -g allow-rename off
+set -g automatic-rename off
+bind h select-pane -L
+bind j select-pane -D
+bind k select-pane -U
+bind l select-pane -R
+bind | split-window -h -c "#{pane_current_path}"
+bind - split-window -v -c "#{pane_current_path}"
+bind c new-window -c "#{pane_current_path}"
+setw -g mode-keys vi
+bind -T copy-mode-vi v send -X begin-selection
+bind -T copy-mode-vi y send -X copy-pipe-and-cancel "xclip -sel clip 2>/dev/null || true"
+set -g status-style "bg=#1e1e2e,fg=#cdd6f4"
+set -g status-left "#[fg=#89b4fa,bold] #S "
+set -g status-right "#[fg=#a6adc8] %H:%M  %d %b "
+set -g window-status-format         "#[fg=#6c7086] #I:#W "
+set -g window-status-current-format "#[fg=#cdd6f4,bg=#313244,bold] #I:#W "
+TMUXEOF
+fi
+
+# ─── Auto-attach tmux on SSH ─────────────────────────────────────────────────
+SHELL_RC="$HOME/.bashrc"
+[[ -f "$HOME/.zshrc" ]] && SHELL_RC="$HOME/.zshrc"
+
+if ! grep -q "auto-tmux" "$SHELL_RC" 2>/dev/null; then
+  cat >> "$SHELL_RC" << 'RCEOF'
+
+# auto-tmux: attach or create session when SSH'd in
+if [[ -z "$TMUX" ]] && [[ -n "$SSH_CONNECTION" ]]; then
+  tmux attach-session -t main 2>/dev/null || tmux new-session -s main
+fi
+RCEOF
+fi
+
+# ─── Done ────────────────────────────────────────────────────────────────────
+green ""
+green "✓ Done. Add your API keys to $SHELL_RC:"
+yellow "  export ANTHROPIC_API_KEY=sk-ant-..."
+yellow "  export OPENAI_API_KEY=sk-..."
+green ""
+green "Then: tmux new -s work"
+green "      nvim → :Lazy sync"
+green "      claude / codex"
